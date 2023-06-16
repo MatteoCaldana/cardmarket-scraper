@@ -7,12 +7,14 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.common.exceptions import NoSuchElementException
 from selenium.common.exceptions import ElementNotVisibleException, ElementNotSelectableException
 
+import os
 import re
 import bs4
 import base64
 import json
 import string
 import random
+import pandas as pd
 
 from utils import tprint, sleep, heuristic_str2url, request
 
@@ -21,7 +23,7 @@ from utils import tprint, sleep, heuristic_str2url, request
 ################################################################################
 
 BASE_URL = "https://www.cardmarket.com/en"
-BACKOFF = 2.0
+BACKOFF = 3.0
 
 
 def set_default_backoff(backoff):
@@ -34,21 +36,35 @@ def set_default_backoff(backoff):
 ################################################################################
 
 
-def find_singles(expansions, brand="Pokemon", backoff=BACKOFF):
+def find_singles(expansions, brand="Pokemon", backoff=BACKOFF, save_tmp=False):
     base_url = f"{BASE_URL}/{brand}/Products/Singles/{{}}?site={{}}"
 
     singles_list = []
-    for i, expansion in expansions:
-        expansion = heuristic_str2url(expansion)
-        url = base_url.format(expansion, "1")
+    saved_list = []
+    for expansion in expansions:
+        expansion_url = heuristic_str2url(expansion["name"])
+        url = base_url.format(expansion_url, "1")
         page = request("get", url).content.decode("utf-8")
         n_pages = _parse_tot_num_pages(page)
 
         for i in range(1, n_pages + 1):
-            tprint(f"Expansion: {expansion}, pages:{i}/{n_pages}")
-            new_singles_list = _find_all_singles_in_page(base_url.format(expansion, i))
-            sleep(backoff)
+            tprint(f"Expansion: {expansion['name']}, pages:{i}/{n_pages}")
+            if i > 1:
+                url = base_url.format(expansion_url, i)
+                page = request("get", url).content.decode("utf-8")
+            new_singles_list = _find_all_singles_in_page(page)
             singles_list += new_singles_list
+            sleep(backoff)
+
+        if save_tmp:
+            filename = f".{expansion_url}.tmp.csv"
+            saved_list.append(filename)
+            df = pd.DataFrame(new_singles_list)
+            df.to_csv(filename, index=False)
+            
+    for file in saved_list:
+        os.remove(file)
+            
     return singles_list
 
 
@@ -61,12 +77,11 @@ def _parse_tot_num_pages(page):
     return n_singles // 20 + 1
 
 
-def _find_all_singles_in_page(url):
-    page = request("get", url).content.decode("utf-8")
+def _find_all_singles_in_page(page):
     soup = bs4.BeautifulSoup(page, features="lxml")
     cards = soup.find("div", {"class": "table-body"}).find_all(
         "div", {"class": "row no-gutters"}
-    )[1::2]
+    )[::2]
 
     singles_list = []
     for card in cards:
@@ -75,7 +90,19 @@ def _find_all_singles_in_page(url):
 
 
 def _extract_card(bs4_card):
-    return bs4_card.find("a")["href"]
+    spans = bs4_card.find_all("span")
+    price = bs4_card.find_all("div", {"class": "col-price"})
+    avail = bs4_card.find_all("div", {"class": "col-availability"})
+    number = bs4_card.find("div", {"class": "col-md-2"}).text
+    return {
+        "url": bs4_card.find_all("a")[1]["href"],
+        "number": number,
+        "rarity": spans[3]["data-original-title"],
+        "available": avail[0].text,
+        "min_price": price[0].text,
+        "available_rev": avail[1].text,
+        "min_price_rev": price[1].text,
+    }
 
 
 ################################################################################
@@ -89,7 +116,7 @@ def find_expansions(brand="Pokemon"):
     )
     soup = bs4.BeautifulSoup(page, features="lxml")
     sets = soup.find("select", {"name": "idExpansion"}).find_all("option")
-    sets = [(i["value"], i.text) for i in sets]
+    sets = [{"id": i["value"], "name": i.text} for i in sets]
     return sets[1:]  # the first option is "All"
 
 
@@ -290,18 +317,19 @@ def get_articles_requests(
     options_str = f"?{options_str}" if options_str else ""
     url = f"{BASE_URL}/{brand}/Products/{product}/{product_name}{options_str}"
 
-    all_rows = []
-
     get_response = request("get", url, headers=GET_HEADERS, proxies=proxies)
     get_content = get_response.content.decode("utf-8")
 
     soup = bs4.BeautifulSoup(get_content, features="lxml")
-    all_rows.append(_find_articles_in_page(soup.find("div", {"class": "table-body"})))
-    load_more_button = soup.find("button", {"id": "loadMoreButton"})["onclick"]
+    all_rows = _find_articles_in_page(soup.find("div", {"class": "table-body"}))
+    try:
+        load_more_button = soup.find("button", {"id": "loadMoreButton"})["onclick"]
+    except:
+        load_more_button = False
 
     if not load_more_button:
         tprint("Load more button is not present")
-        return all_rows[0]
+        return all_rows
 
     m = re.match(
         r"jcp\(\'([A-Z0-9%]+)\'"
@@ -366,10 +394,9 @@ def get_articles_requests(
         new_page = post_soup.find("newpage").text
 
         rows_raw = base64.b64decode(rows_b64).decode("utf-8")
-        all_rows.append(_find_articles_in_page(rows_raw))
+        all_rows += _find_articles_in_page(rows_raw)
 
     return all_rows
-
 
 
 def get_driver(proxy=None):
@@ -446,16 +473,28 @@ def get_articles_selenium(
 ################################################################################
 
 if __name__ == "__main__":
-    # brand = "Magic"
+    # brand = "Pokemon"
     # expansions = find_expansions(brand)
-    # singles = find_singles([expansions[0]], brand)
+    # singles = find_singles(expansions, brand)
 
     # a = find_user(
     #     "Pokemon", "GeCaFeProject", "Singles", {"idLanguage": 7, "minPrice": 15}
     # )
+    options = {"language": "1,5", "minCondition": 5, "isSigned": "N", "isAltered": "N"}
+    options = {"minCondition": 3, "isSigned": "N", "isAltered": "N"}
 
-    options = {"language": "1,5", "minCondition": 5, "isSigned": "N"}
-    driver = get_driver()
-    a = get_articles_selenium(
-        driver, "Pokemon", "Singles", "Neo-Genesis/Focus-Band-N186", options=options
-    )
+    products = [
+        "Leaders-Stadium/Mistys-Tears-LST",
+        "Challenge-from-the-Darkness/Sabrinas-Gengar-CFTD",
+        "Challenge-from-the-Darkness/Kogas-Ninja-Trick-CFTD",
+        "Rocket-Gang/Grimer",
+        "Challenge-from-the-Darkness/Sabrinas-Gaze-CFTD"
+    ]
+    articles = []
+    for product in products:
+        tmp = get_articles_requests(
+            "Pokemon", "Singles", product, options=options
+        )
+        articles += [{"product": product, **a} for a in tmp]
+        sleep(BACKOFF)
+        #pd.DataFrame(a).to_csv(f".{product.replace('/','.')}.tmp.csv", index=False)

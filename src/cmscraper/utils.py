@@ -2,6 +2,8 @@ import time
 import datetime
 import requests
 
+def get_timestamp():
+    return datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
 def tprint(*kargs, **kwargs):
     print(datetime.datetime.now(), *kargs, **kwargs)
@@ -36,7 +38,7 @@ def apply_dict_safe(x, table):
 
 
 CONDITION_DICT = [
-    {"long": "Mint", "short": "MI", "id": 1},
+    {"long": "Mint", "short": "MT", "id": 1},
     {"long": "Near Mint", "short": "NM", "id": 2},
     {"long": "Excellent", "short": "EX", "id": 3},
     {"long": "Good", "short": "GD", "id": 4},
